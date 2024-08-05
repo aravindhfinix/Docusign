@@ -1,13 +1,13 @@
 const express = require('express');
 const docusign = require('docusign-esign');
 const fs = require('fs');
-
+const prompt = require('prompt-sync')();
 const app = express();
 const port = 4000;
 
 const jwtConfig = {
-  integrationKey: 'e97f7b44-fdd0-43ab-a11a-6c7d0a5a8505',
-  userId: '28156124-5d99-4865-bcb6-2f432d704e48',
+  integrationId: 'a171db04-8aad-40ee-8574-df29291f31f5',
+  userKeyId: '3f627a02-f0e2-447e-81f7-6015819137bc',
   privateKeyLocation: './private.key',
   dsOauthServer: 'https://account-d.docusign.com'
 };
@@ -20,6 +20,7 @@ app.use(express.urlencoded({ extended: true }));
 app.post('/send', async (req, res) => {
   const filePath = './World_Wide_Corp_lorem.pdf'; // Path to your local file
   const userEmail = req.body.userEmail;
+  const userId = req.body.userId;
 
   if (!userEmail) {
     return res.status(400).send('User email is required.');
@@ -28,11 +29,11 @@ app.post('/send', async (req, res) => {
   try {
     // Authenticate and get the access token and account ID
     const authData = await authenticate();
-    const envelopeId = await sendDocumentForSignature(filePath, userEmail, authData);
-    const recipientViewUrl = await createRecipientView(envelopeId, userEmail, authData);
+    const envelopeId = await sendDocumentForSignature(filePath, userEmail, userId, authData);
+    const recipientViewUrl = await createRecipientView(envelopeId, userEmail, userId, authData);
     res.status(200).json({ message: 'Document sent successfully for signature', envelopeId: envelopeId, recipientViewUrl: recipientViewUrl });
   } catch (error) {
-    console.error(error);
+    console.error('Error in /send route:', error);
     res.status(500).send('Error sending document for signature.');
   }
 });
@@ -51,7 +52,7 @@ app.get('/envelopes/:envelopeId', async (req, res) => {
     const envelopeDetails = await getEnvelopeDetails(envelopeId, authData);
     res.status(200).json(envelopeDetails);
   } catch (error) {
-    console.error(error);
+    console.error('Error in /envelopes/:envelopeId route:', error);
     res.status(500).send('Error retrieving envelope details.');
   }
 });
@@ -64,8 +65,8 @@ async function authenticate() {
   let rsaKey = fs.readFileSync(jwtConfig.privateKeyLocation);
 
   try {
-    const results = await dsApi.requestJWTUserToken(jwtConfig.integrationKey,
-      jwtConfig.userId, SCOPES, rsaKey, jwtLifeSec);
+    const results = await dsApi.requestJWTUserToken(jwtConfig.integrationId,
+      jwtConfig.userKeyId, SCOPES, rsaKey, jwtLifeSec);
     const accessToken = results.body.access_token;
 
     // get user info
@@ -80,25 +81,20 @@ async function authenticate() {
       basePath: `${userInfo.baseUri}/restapi`
     };
   } catch (e) {
-    console.log(e);
-    let body = e.response && e.response.body;
+    console.error('Error in authentication:', e);
     // Determine the source of the error
-    if (body) {
-      // The user needs to grant consent
-      if (body.error && body.error === 'consent_required') {
-        console.log('Consent required');
-        if (getConsent()) { return authenticate(); }
-      } else {
-        // Consent has been granted. Show status code for DocuSign API error
-        console.log(`\nAPI problem: Status code ${e.response.status}, message body:
+    if (e.response.data.error === 'consent_required') {
+      if (getConsent()) { return authenticate(); }
+    } else {
+      // Consent has been granted. Show status code for DocuSign API error
+      console.log(`\nAPI problem: Status code ${e.response.status}, message body:
         ${JSON.stringify(body, null, 4)}\n\n`);
-      }
     }
   }
 }
 
 // Function to send document for signature using DocuSign
-async function sendDocumentForSignature(filePath, userEmail, authData) {
+async function sendDocumentForSignature(filePath, userEmail, userId, authData) {
   const apiClient = new docusign.ApiClient();
   apiClient.setBasePath(authData.basePath);
   apiClient.addDefaultHeader('Authorization', 'Bearer ' + authData.accessToken);
@@ -122,7 +118,7 @@ async function sendDocumentForSignature(filePath, userEmail, authData) {
   signer.name = 'User'; // Replace with the recipient's name
   signer.recipientId = '1'; // This must match the recipientId used in the view request
   signer.routingOrder = '1';
-  signer.clientUserId = 'unique-client-user-id'; // Ensure this matches the clientUserId used in the view request
+  signer.clientUserId = userId; // Ensure this matches the clientUserId used in the view request
 
   const signHere = new docusign.SignHere();
   signHere.documentId = '1';
@@ -137,15 +133,15 @@ async function sendDocumentForSignature(filePath, userEmail, authData) {
 
   envDef.recipients = new docusign.Recipients();
   envDef.recipients.signers = [signer];
-  envDef.status = 'sent';
+  envDef.status = 'sent'; // Ensure the envelope status is set to 'sent'
 
   const results = await envelopesApi.createEnvelope(authData.apiAccountId, { envelopeDefinition: envDef });
-  console.log(results, 'Envelope created');
+  console.log('Envelope created:', results);
   return results.envelopeId;
 }
 
 // Function to create recipient view URL
-async function createRecipientView(envelopeId, userEmail, authData) {
+async function createRecipientView(envelopeId, userEmail, userId, authData) {
   const apiClient = new docusign.ApiClient();
   apiClient.setBasePath(authData.basePath);
   apiClient.addDefaultHeader('Authorization', 'Bearer ' + authData.accessToken);
@@ -158,12 +154,12 @@ async function createRecipientView(envelopeId, userEmail, authData) {
   viewRequest.email = userEmail;
   viewRequest.userName = 'User'; // Replace with the recipient's name
   viewRequest.recipientId = '1'; // This must match the recipientId used in the envelope
-  viewRequest.clientUserId = 'unique-client-user-id'; // Unique identifier for the recipient, should be a unique string for each recipient
+  viewRequest.clientUserId = userId; // Unique identifier for the recipient, should be a unique string for each recipient
 
   try {
     // Create the recipient view
     const recipientView = await envelopesApi.createRecipientView(authData.apiAccountId, envelopeId, { recipientViewRequest: viewRequest });
-    
+
     // Return or log the view URL
     return recipientView.url;
   } catch (error) {
@@ -184,6 +180,29 @@ async function getEnvelopeDetails(envelopeId, authData) {
   return envelopeDetails;
 }
 
+function getConsent() {
+  var urlScopes = SCOPES.join('+');
+
+  // Construct consent URL
+  var redirectUri = 'http://localhost:4000';
+  var consentUrl = `${jwtConfig.dsOauthServer}/oauth/auth?response_type=code&` +
+    `scope=${urlScopes}&client_id=${jwtConfig.integrationId}&` +
+    `redirect_uri=${redirectUri}`;
+
+  console.log('Open the following URL in your browser to grant consent to the application:');
+  console.log(consentUrl);
+  console.log('Consent granted? \n 1)Yes \n 2)No');
+  let consentGranted = prompt('');
+  if (consentGranted === '1') {
+    return true;
+  } else {
+    console.error('Please grant consent!');
+    process.exit();
+  }
+}
+
+
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);
 });
+
